@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlsplit
@@ -68,25 +69,31 @@ def find_pdf_links(article_url):
             base = urlsplit(href)._replace(query="").geturl()
             if base not in seen_base:
                 seen_base.add(base)
-                pdfs.append(href)
+                pdfs.append(href)  # keep full href, including ?m= timestamp
     return pdfs
+
+
+def content_hash(title, pdf_links):
+    raw = title + "|" + "|".join(sorted(pdf_links))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def load_seen():
     if os.path.exists(SEEN_FILE):
         with open(SEEN_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return []
+    return {}
 
 
-def save_seen(links):
+def save_seen(seen):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(links, f, ensure_ascii=False, indent=2)
+        json.dump(seen, f, ensure_ascii=False, indent=2)
 
 
-def send_telegram_post(title, link, image_url=None):
+def send_telegram_post(title, link, image_url=None, updated=False):
     keyboard = {"inline_keyboard": [[{"text": "🔗 Open Post", "url": link}]]}
-    caption = f"📢 <b>New post</b>\n\n{title}"[:1024]
+    label = "🔄 <b>Updated post</b>" if updated else "📢 <b>New post</b>"
+    caption = f"{label}\n\n{title}"[:1024]
 
     if image_url:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -133,26 +140,35 @@ def main():
     news = fetch_news()
     print(f"Found {len(news)} items")
 
-    seen_links = load_seen()
-    seen_set = set(seen_links)
+    seen = load_seen()
 
-    new_items = [item for item in news if item["link"] not in seen_set]
+    to_send = []  # (item, pdf_links, is_update)
 
-    if new_items:
-        for item in reversed(new_items):
-            send_telegram_post(item["title"], item["link"], item.get("image"))
+    for item in news:
+        link = item["link"]
+        try:
+            pdf_links = find_pdf_links(link)
+        except Exception as e:
+            print(f"Couldn't fetch PDFs for {link}: {e}")
+            pdf_links = []
 
-            try:
-                pdf_links = find_pdf_links(item["link"])
-                for pdf_url in pdf_links:
-                    send_telegram_pdf(pdf_url, caption=item["title"])
-            except Exception as e:
-                print(f"Couldn't check/send PDF for {item['link']}: {e}")
+        h = content_hash(item["title"], pdf_links)
 
-            seen_links.append(item["link"])
+        if link not in seen:
+            to_send.append((item, pdf_links, False))
+        elif seen[link] != h:
+            to_send.append((item, pdf_links, True))
 
-        save_seen(seen_links)
-        print(f"Sent {len(new_items)} new item(s).")
+        seen[link] = h
+
+    if to_send:
+        for item, pdf_links, is_update in reversed(to_send):
+            send_telegram_post(item["title"], item["link"], item.get("image"), updated=is_update)
+            for pdf_url in pdf_links:
+                send_telegram_pdf(pdf_url, caption=item["title"])
+
+        save_seen(seen)
+        print(f"Sent {len(to_send)} item(s) ({sum(1 for _,_,u in to_send if u)} updates).")
     else:
         print("No new items.")
 
