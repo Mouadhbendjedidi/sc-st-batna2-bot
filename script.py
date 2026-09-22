@@ -69,7 +69,7 @@ def find_pdf_links(article_url):
             base = urlsplit(href)._replace(query="").geturl()
             if base not in seen_base:
                 seen_base.add(base)
-                pdfs.append(href)  # keep full href, including ?m= timestamp
+                pdfs.append(href)
     return pdfs
 
 
@@ -81,7 +81,11 @@ def content_hash(title, pdf_links):
 def load_seen():
     if os.path.exists(SEEN_FILE):
         with open(SEEN_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        if isinstance(data, list):
+            # Old format (flat list of links) — migrate to dict, hash unknown yet
+            return {link: None for link in data}
+        return data
     return {}
 
 
@@ -156,6 +160,8 @@ def main():
 
         if link not in seen:
             to_send.append((item, pdf_links, False))
+        elif seen[link] is None:
+            pass  # migrated entry — silently backfill hash, no notification
         elif seen[link] != h:
             to_send.append((item, pdf_links, True))
 
@@ -168,8 +174,9 @@ def main():
                 send_telegram_pdf(pdf_url, caption=item["title"])
 
         save_seen(seen)
-        print(f"Sent {len(to_send)} item(s) ({sum(1 for _,_,u in to_send if u)} updates).")
+        print(f"Sent {len(to_send)} item(s) ({sum(1 for _, _, u in to_send if u)} updates).")
     else:
+        save_seen(seen)
         print("No new items.")
 
 
